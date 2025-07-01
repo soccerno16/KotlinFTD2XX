@@ -1,4 +1,4 @@
-rootProject.name = "SoftModem"
+rootProject.name = "KotlinFTDXX"
 enableFeaturePreview("TYPESAFE_PROJECT_ACCESSORS")
 
 pluginManagement {
