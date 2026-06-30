@@ -136,13 +136,30 @@ class FTDIDevice private constructor(
     }
 
     /**
-     * Write data to the device.
+     * Writes a byte array to the FTDI device.
      *
-     * @param data The data to write
+     * The data is sent using the underlying [FTDevice.write] call.  If the write succeeds,
+     * a {@link CommandResponse} with type {@link CommandType#WRITE} and `success = true`
+     * is emitted on [_commandResponseFlow], containing the number of bytes written in
+     * its `data` field.
+     *
+     * @param data       The byte array to be transmitted to the device.
+     * @param wait        When **true**, the call blocks until the device acknowledges the write
+     *                    or the specified [waitTime] elapses.  If **false** (default), the
+     *                    operation returns immediately after queuing the data.
+     * @param waitTime   The maximum time, in milliseconds, to wait for a write acknowledgment
+     *                    when [wait] is true.  Ignored if [wait] is false.  Default is `100ms`.
+     *
+     * @return The number of bytes actually written as reported by the driver.
+     *         Returns `-1` if an exception occurs during the operation; in this case a
+     *         failure {@link CommandResponse} is also emitted on [_commandResponseFlow].
+     *
+     * @throws Exception  Propagates any unexpected exceptions from the underlying driver,
+     *                    which are caught and transformed into a failed command response.
      */
-    fun write(data: ByteArray): Int {
+    fun write(data: ByteArray, wait: Boolean = false, waitTime: Long = 100): Int {
         return try {
-            val bytesWritten = device.write(data)
+            val bytesWritten = device.write(data,wait=wait, waitTime = waitTime)
             _commandResponseFlow.value = (CommandResponse(
                 CommandType.WRITE,
                 success = true,
