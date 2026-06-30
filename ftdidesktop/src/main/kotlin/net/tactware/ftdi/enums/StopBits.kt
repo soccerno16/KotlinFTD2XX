@@ -5,7 +5,6 @@ package net.tactware.ftdi.enums
  */
 enum class StopBits(val value: Int) {
     ONE(0),
-    ONE_POINT_FIVE(1),
     TWO(2);
     
     companion object {

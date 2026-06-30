@@ -339,12 +339,101 @@ class FTDevice private constructor(
      * @return Number of bytes actually written
      * @throws FTD2XXException If operation fails
      */
-    fun write(bytes: ByteArray, offset: Int = 0, length: Int = bytes.size - offset): Int {
+    fun write(bytes: ByteArray, offset: Int = 0, length: Int = bytes.size - offset, wait : Boolean = true, waitTime: Long = 100): Int {
         val memory = Memory(length.toLong())
         memory.write(0, bytes, offset, length)
         val wrote = IntByReference()
         ensureFTStatus(ftd2xx.FT_Write(ftHandle, memory, length, wrote))
-        return wrote.value
+        if(!wait)
+            return wrote.value
+        return awaitTransferCompletion(waitTime, wrote.value)
+    }
+
+    /**
+     * Waits until the FTDI driver reports that the last transfer has finished,
+     * or until the supplied timeout expires.
+     *
+     * @param timeoutMillis total waiting time (ms)
+     * @param rc             value to return when the transfer succeeds
+     * @return               `rc` on success,
+     *                       -2 on any timeout,
+     *                       -4 on an unexpected exception
+     */
+    fun awaitTransferCompletion(
+        timeoutMillis: Long,
+        rc: Int
+    ): Int {
+        val startTime = System.currentTimeMillis()
+        var workerThread: Thread? = null
+
+        try {
+            while (true) {
+                // -------------------------------------------------
+                // 1 Compute remaining time
+                // -------------------------------------------------
+                val elapsed   = System.currentTimeMillis() - startTime
+                val timeLeft  = timeoutMillis - elapsed
+                if (timeLeft <= 0L) {
+                    // overall timeout → abort any pending transfer
+                    ftd2xx.FT_Purge (ftHandle, Purge.RX_TX.value)
+                    return -2
+                }
+
+                // -------------------------------------------------
+                // 2️ Start a *single* thread that performs a dummy read.
+                //    The dummy read blocks only until the driver reports that the FIFO is empty.
+                // -------------------------------------------------
+                val readResult = IntByReference(-1)          // will hold the number of bytes read (or error)
+                workerThread = Thread {
+                    try {
+                        val memory = Memory(1)
+                        val dummy = IntByReference()
+                        ftd2xx.FT_Read(ftHandle, memory, 1      , readResult)
+                    } catch (_: Exception) {
+                        // Swallow – the outer `try/catch` will handle any problem later.
+                    }
+                }
+
+                workerThread.start()
+                // -------------------------------------------------
+                // 3 Wait for the thread to finish, but no longer than the remaining time.
+                // -------------------------------------------------
+                workerThread.join(timeLeft)
+
+                if (workerThread.isAlive) {
+                    // ---- timeout while waiting for dummy read --------------------
+                    // Interrupt the worker (so the native call can be aborted)
+                    workerThread.interrupt()
+                    ftd2xx.FT_Purge (ftHandle, Purge.RX_TX.value)
+                    return -2            // inner timeout, same code as the original version
+                }
+
+                // -------------------------------------------------
+                // 4 Thread finished → dummy read completed successfully.
+                //    If `readResult` is negative we treat it as an error,
+                //    otherwise the transfer is considered done.
+                // -------------------------------------------------
+                if (readResult.value < 0) {
+                    // The underlying FTDI call failed – map to generic failure.
+                    return -4
+                }
+
+                // Success: the device has become idle, so the original write can be deemed complete.
+                return rc
+            }
+        } catch (ex: Exception) {
+            // Any unexpected exception – keep the same contract as the Java version.
+            ex.printStackTrace()   // replace with your logging framework if desired
+            return -4
+        } finally {
+            // Ensure we do not leak a thread in pathological cases.
+            workerThread?.let {
+                if (it.isAlive) {
+                    it.interrupt()
+                    it.join(100)          // give it a moment to shut down
+                }
+            }
+        }
     }
     
     /**
