@@ -1,4 +1,4 @@
-import org.jetbrains.compose.desktop.application.dsl.TargetFormat
+import java.util.*
 
 plugins {
     // this is necessary to avoid the plugins to be loaded multiple times
@@ -11,3 +11,21 @@ plugins {
     alias(libs.plugins.shadow) apply false
 }
 
+// Load secrets from local.properties (not committed) if present
+val localProperties: Properties by lazy {
+    val props = Properties()
+    val file = rootProject.file("local.properties")
+    if (file.exists()) file.inputStream().use { props.load(it) }
+    props
+}
+
+subprojects {
+    plugins.withId("maven-publish") {
+        the<org.gradle.api.publish.PublishingExtension>().repositories {
+            maven {
+                name = "staging"
+                url = uri(rootProject.layout.buildDirectory.dir("staging-deploy"))
+            }
+        }
+    }
+}

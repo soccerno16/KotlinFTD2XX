@@ -1,20 +1,17 @@
-import com.android.build.gradle.internal.tasks.factory.dependsOn
-import java.util.Properties
-
 plugins {
     alias(libs.plugins.kotlin.jvm)
     alias(libs.plugins.shadow)
-    `maven-publish`
 }
 
 dependencies {
-    implementation(libs.kotlinx.atomicfu)
-    implementation(libs.kotlinx.coroutines.core)
-    implementation(libs.kotlinx.coroutines.swing)
+    // Thin project artifact — JNA/coroutines come transitively via ftdidesktop's api deps.
     implementation(projects.ftdidesktop)
-    implementation(libs.jna)
 }
 
-
-
-
+// Demo fat jar only. Do not shade Kotlin/kotlinx (consumers must use the thin Maven artifact).
+tasks.shadowJar {
+    exclude("kotlin/**")
+    exclude("kotlinx/**")
+    exclude("META-INF/*.kotlin_module")
+    exclude("META-INF/services/kotlinx.coroutines.*")
+}
