@@ -6,12 +6,15 @@ import com.sun.jna.Pointer
 import com.sun.jna.ptr.ByteByReference
 import com.sun.jna.ptr.IntByReference
 import com.sun.jna.ptr.PointerByReference
+import kotlinx.atomicfu.locks.ReentrantLock
 
 /**
  * JNA interface for the FTD2XX native library.
  */
 interface FTD2XX : Library {
     companion object {
+
+        val _enumMutex = ReentrantLock() // only for create/info-list operations
         /**
          * Load the FTD2XX library.
          */
@@ -82,6 +85,10 @@ interface FTD2XX : Library {
      * @return FT_STATUS: FT_OK if successful, otherwise the return value is an FT error code.
      */
     fun FT_Close(ftHandle: Pointer): Int
+
+    // The correlation function: given an open D2XX handle, returns the
+    // Windows-assigned COM port number for that device (-1 if none/VCP not loaded).
+    fun FT_GetComPortNumber(ftHandle: Pointer, comPortNumber: IntByReference): Int
 
     /**
      * Read data from the device.
@@ -214,6 +221,28 @@ interface FTD2XX : Library {
      * @return FT_STATUS: FT_OK if successful, otherwise the return value is an FT error code.
      */
     fun FT_ResetDevice(ftHandle: Pointer): Int
+
+    /**
+     * Send a reset command to the port. Unlike FT_ResetDevice, this clears the port's
+     * internal buffers without a full device reset - lighter weight, worth trying before
+     * FT_CyclePort. Windows only.
+     *
+     * @param ftHandle Handle of the device.
+     * @return FT_STATUS: FT_OK if successful, otherwise the return value is an FT error code.
+     */
+    fun FT_ResetPort(ftHandle: Pointer): Int
+
+    /**
+     * Simulates a USB unplug/replug at the driver level, forcing the device to
+     * re-enumerate, without physically disconnecting the cable. More disruptive than
+     * FT_ResetPort - use as an escalation when a plain reset doesn't clear a stuck
+     * device. Windows only. The handle becomes invalid after this call; the caller
+     * must FT_Close it and reopen the device afterward.
+     *
+     * @param ftHandle Handle of the device.
+     * @return FT_STATUS: FT_OK if successful, otherwise the return value is an FT error code.
+     */
+    fun FT_CyclePort(ftHandle: Pointer): Int
 
     /**
      * Set the BREAK condition for the device.

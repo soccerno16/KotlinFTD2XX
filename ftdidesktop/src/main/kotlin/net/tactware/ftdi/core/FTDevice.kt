@@ -12,8 +12,10 @@ import kotlinx.coroutines.flow.asSharedFlow
 import net.tactware.ftdi.enums.*
 import net.tactware.ftdi.exception.FTD2XXException
 import net.tactware.ftdi.jna.FTD2XX
+import net.tactware.ftdi.jna.FTD2XX.Companion._enumMutex
 import java.io.Closeable
 import java.nio.charset.Charset
+import kotlin.concurrent.withLock
 
 fun memoryPointerToString(memory: Memory, charset: Charset = Charset.defaultCharset()): String {
     return memory.getString(0, charset.name())
@@ -47,37 +49,41 @@ class FTDevice private constructor(
          */
         @JvmStatic
         fun openByIndex(index: Int): FTDevice {
-            val ftd2xx = FTD2XX.INSTANCE
-            
-            // Get device info first
-            val numDevs = IntByReference()
-            ensureFTStatus(ftd2xx.FT_CreateDeviceInfoList(numDevs))
-            
-            if (index >= numDevs.value) {
-                throw FTD2XXException(FT_STATUS.FT_DEVICE_NOT_FOUND, "Device index out of range: $index")
+            return _enumMutex.withLock {
+                val ftd2xx = FTD2XX.INSTANCE
+
+                // Get device info first
+                val numDevs = IntByReference()
+                ensureFTStatus(ftd2xx.FT_CreateDeviceInfoList(numDevs))
+
+                if (index >= numDevs.value) {
+                    throw FTD2XXException(FT_STATUS.FT_DEVICE_NOT_FOUND, "Device index out of range: $index")
+                }
+
+                val flags = IntByReference()
+                val type = IntByReference()
+                val id = IntByReference()
+                val locId = IntByReference()
+                val serialNumberBuffer = Memory(16 + 1)
+                val descriptionBuffer = Memory(64 + 1)
+                val ftHandleRef = PointerByReference()
+
+                ensureFTStatus(
+                    ftd2xx.FT_GetDeviceInfoDetail(
+                        index, flags, type, id, locId, serialNumberBuffer, descriptionBuffer, ftHandleRef
+                    )
+                )
+
+                // Now open the device
+                val pftHandle = PointerByReference()
+                ensureFTStatus(ftd2xx.FT_Open(index, pftHandle))
+
+                // Get serial number and description
+                val serialNumber = memoryPointerToString(serialNumberBuffer)
+                val description = memoryPointerToString(descriptionBuffer)
+
+                FTDevice(pftHandle.value, index, serialNumber, description)
             }
-
-            val flags = IntByReference()
-            val type = IntByReference()
-            val id = IntByReference()
-            val locId = IntByReference()
-            val serialNumberBuffer = Memory(16+1)
-            val descriptionBuffer = Memory(64+1)
-            val ftHandleRef = PointerByReference()
-
-            ensureFTStatus(ftd2xx.FT_GetDeviceInfoDetail(
-                index, flags, type, id, locId, serialNumberBuffer, descriptionBuffer, ftHandleRef
-            ))
-            
-            // Now open the device
-            val pftHandle = PointerByReference()
-            ensureFTStatus(ftd2xx.FT_Open(index, pftHandle))
-            
-            // Get serial number and description
-            val serialNumber = memoryPointerToString(serialNumberBuffer)
-            val description = memoryPointerToString(descriptionBuffer)
-            
-            return FTDevice(pftHandle.value, index, serialNumber, description)
         }
         
         /**
@@ -89,46 +95,60 @@ class FTDevice private constructor(
          */
         @JvmStatic
         fun openBySerialNumber(serialNumberToOpen: String): FTDevice {
-            val ftd2xx = FTD2XX.INSTANCE
-            val pftHandle = PointerByReference()
-            
-            ensureFTStatus(ftd2xx.FT_OpenEx(serialNumberToOpen, 1, pftHandle))
-            
-            // Find the device index
-            val numDevs = IntByReference()
-            ensureFTStatus(ftd2xx.FT_CreateDeviceInfoList(numDevs))
-            
-            var deviceIndex = -1
-            var serialNumber = String()
-            var description = String()
+            return _enumMutex.withLock {
+                val ftd2xx = FTD2XX.INSTANCE
+                var pftHandle = PointerByReference()
 
-            for (i in 0 until numDevs.value) {
-                val flags = IntByReference()
-                val type = IntByReference()
-                val id = IntByReference()
-                val locId = IntByReference()
-                val serialNumberBuffer = Memory(16+1)
-                val descriptionBuffer = Memory(64+1)
-                val ftHandleRef = PointerByReference()
-                ensureFTStatus(ftd2xx.FT_GetDeviceInfoDetail(
-                    i, flags, type, id, locId, serialNumberBuffer, descriptionBuffer, ftHandleRef
-                ))
+                // Find the device index
+                val numDevs = IntByReference()
+                ensureFTStatus(ftd2xx.FT_CreateDeviceInfoList(numDevs))
 
-                serialNumber = memoryPointerToString(serialNumberBuffer)
-                description = memoryPointerToString(descriptionBuffer)
+                var deviceIndex = -1
+                var serialNumber = String()
+                var description = String()
+                var isOpen = false
 
-                if(serialNumberToOpen.equals(serialNumber)) {
-                    deviceIndex = i
-                    break
+                for (i in 0 until numDevs.value) {
+                    val flags = IntByReference()
+                    val type = IntByReference()
+                    val id = IntByReference()
+                    val locId = IntByReference()
+                    val serialNumberBuffer = Memory(16 + 1)
+                    val descriptionBuffer = Memory(64 + 1)
+                    val ftHandleRef = PointerByReference()
+
+                    val status = ftd2xx.FT_GetDeviceInfoDetail(
+                            i, flags, type, id, locId, serialNumberBuffer, descriptionBuffer, ftHandleRef)
+
+                    serialNumber = memoryPointerToString(serialNumberBuffer)
+                    description = memoryPointerToString(descriptionBuffer)
+                    pftHandle = ftHandleRef
+                    isOpen = flags.value and 0x01 == 0x01
+
+                    if (serialNumberToOpen == serialNumber && status== FT_STATUS.FT_OK.value) {
+                        deviceIndex = i
+                        break
+                    }
                 }
-            }
 
-            if (deviceIndex == -1) {
-                throw FTD2XXException(FT_STATUS.FT_DEVICE_NOT_FOUND, "Device with serial number $serialNumber not found")
-            }
+                if (deviceIndex == -1) {
+                    throw FTD2XXException(
+                        FT_STATUS.FT_DEVICE_NOT_FOUND,
+                        "Device with serial number $serialNumber not found"
+                    )
+                }
 
-            // Get serial number and description
-            return FTDevice(pftHandle.value, deviceIndex, serialNumber, description)
+                //ensureFTStatus(ftd2xx.FT_OpenEx(serialNumberToOpen, 1, pftHandle))
+                //Check to see if the device is already open
+                if(isOpen)
+                {
+                    ensureFTStatus(ftd2xx.FT_Close(pftHandle.value))
+                }
+                ensureFTStatus(ftd2xx.FT_Open(deviceIndex,pftHandle))
+
+                // Get serial number and description
+                FTDevice(pftHandle.value, deviceIndex, serialNumber, description)
+            }
         }
         
         /**
@@ -277,39 +297,13 @@ class FTDevice private constructor(
     }
 
     /**
-     * This function retunrs whether the device is open
+     * This function returns whether the device is open
      * @return Boolean true if open
      */
     fun isOpen(): Boolean {
-        val ftd2xx = FTD2XX.INSTANCE
-
-        // Find the device index
-        val numDevs = IntByReference()
-        ensureFTStatus(ftd2xx.FT_CreateDeviceInfoList(numDevs))
-
-        for (i in 0 until numDevs.value) {
-            val flags = IntByReference()
-            val type = IntByReference()
-            val id = IntByReference()
-            val locId = IntByReference()
-            val serialNumberBuffer = Memory(16+1)
-            val descriptionBuffer = Memory(64+1)
-            val ftHandleRef = PointerByReference()
-            ensureFTStatus(ftd2xx.FT_GetDeviceInfoDetail(
-                i, flags, type, id, locId, serialNumberBuffer, descriptionBuffer, ftHandleRef
-            ))
-
-            if(deviceIndex == i) {
-                //Device found, check the flags
-                //Bit 0 (least significant bit) of this number indicates if the port is open (1) or closed (0). Bit 1
-                //indicates if the device is enumerated as a high-speed USB device (2) or a full-speed USB device (0). The
-                //remaining bits (2 - 31) are reserved
-                if(flags.value and 0x01 == 0x01)
-                    return true
-                break
-            }
-        }
-        return false
+        val modemStatus = IntByReference()
+        val ftStatus = ftd2xx.FT_GetModemStatus(ftHandle,modemStatus)
+        return ftStatus == FT_STATUS.FT_OK.value
     }
 
     /**
@@ -344,7 +338,7 @@ class FTDevice private constructor(
         memory.write(0, bytes, offset, length)
         val wrote = IntByReference()
         ensureFTStatus(ftd2xx.FT_Write(ftHandle, memory, length, wrote))
-        if(!wait)
+        if (!wait)
             return wrote.value
         return awaitTransferCompletion(waitTime, wrote.value)
     }
@@ -531,7 +525,9 @@ class FTDevice private constructor(
      * @throws FTD2XXException If operation fails
      */
     fun setUSBParameters(inTransferSize: Int, outTransferSize: Int) {
-        ensureFTStatus(ftd2xx.FT_SetUSBParameters(ftHandle, inTransferSize, outTransferSize))
+        _enumMutex.withLock {
+            ensureFTStatus(ftd2xx.FT_SetUSBParameters(ftHandle, inTransferSize, outTransferSize))
+        }
     }
     
     /**
@@ -540,9 +536,11 @@ class FTDevice private constructor(
      * @throws FTD2XXException If operation fails
      */
     override fun close() {
-        if (!closed) {
-            ensureFTStatus(ftd2xx.FT_Close(ftHandle))
-            closed = true
+        _enumMutex.withLock {
+            if (!closed) {
+                ensureFTStatus(ftd2xx.FT_Close(ftHandle))
+                closed = true
+            }
         }
     }
 }
